@@ -33,136 +33,6 @@ spss_value_labels <- function(x) {
   data.frame(value = unname(labs), label = names(labs), stringsAsFactors = FALSE)
 }
 
-#' Group descriptives with weighting option
-#'
-#' @param data Data frame containing variables to summarize
-#' @param group Grouping variable (vector or column name)
-#' @param weight Weighting variable (default = unweighted)
-#' @param stat Statistic to compute: "mean", "sum", "median", "var", "min", "max"
-#' @param total Include total row?
-#' @param var_counts Include non-missing counts row?
-#' @param f_stats Include ANOVA F-stat and p-value?
-#' @export
-group_means <- function(data,
-                        group = rep(1, nrow(as.data.frame(data))),
-                        weight = rep(1, nrow(as.data.frame(data))),
-                        stat = "mean",
-                        total = FALSE,
-                        var_counts = FALSE,
-                        f_stats = FALSE) {
-  
-  group <- as.matrix(group)
-  the_vars <- names(as.data.frame(data))
-  data <- data.frame(group = group, weight = weight, data, stringsAsFactors = FALSE)
-  
-  ns <- data %>% 
-    dplyr::group_by(group) %>% 
-    dplyr::count(wt = weight)
-  
-  # Statistic function dispatcher
-  the_function <- switch(stat,
-                         "mean"   = function(x, w) stats::weighted.mean(x, w, na.rm = TRUE),
-                         "sum"    = function(x, w) sum(x * w, na.rm = TRUE),
-                         "var"    = function(x, w) Hmisc::wtd.var(x, w, na.rm = TRUE),
-                         "min"    = function(x, w) min(x, na.rm = TRUE),
-                         "max"    = function(x, w) max(x, na.rm = TRUE),
-                         "median" = function(x, w) matrixStats::weightedMedian(x, w, na.rm = TRUE),
-                         stop("Unknown statistic. Use: mean, sum, median, var, min, max")
-  )
-  
-  # Main calculations
-  means <- data %>%
-    dplyr::group_by(group) %>%
-    dplyr::summarise_at(the_vars, ~ the_function(., weight)) %>%
-    left_join(ns, by = "group") %>%
-    mutate(group = as.character(group)) %>%
-    select(group, n, everything())
-  
-  # Optional total row
-  if (total) {
-    total_row <- data %>%
-      dplyr::group_by(group = "Total") %>%
-      dplyr::summarise_at(the_vars, ~ the_function(., weight))
-  }
-  
-  # Optional non-missing counts
-  if (var_counts) {
-    v_counts <- purrr::map_df(data[, -c(1:2)], 
-                              ~ sum(as.numeric(!is.na(.)) * weight, na.rm = TRUE))
-    v_counts$group <- "Counts (non-missing)"
-  }
-  
-  # Optional F-stats
-  if (f_stats) {
-    Fstats <- purrr::map_dfr(data[, -c(1:2)], function(x) {
-      mod <- stats::aov(x ~ as.factor(group), weight = weight)
-      smod <- stats::anova(mod)
-      fstat <- smod$`F value`[1]
-      pval  <- stats::pf(fstat, smod$Df[1], smod$Df[2], lower.tail = FALSE)
-      data.frame(fstat = fstat, pval = pval)
-    }) %>%
-      mutate(group = c("F Stat", "p value"))
-  }
-  
-  output <- bind_rows(get0("v_counts"), get0("total_row"), get0("Fstats"), means)
-  output %>% dplyr::select(group, one_of("n"), everything())
-}
-
-#' Sorted group means by standardized difference from total
-#'
-#' @param data Data frame of variables to analyze
-#' @param group Grouping variable
-#' @param weight Weighting variable
-#' @export
-group_means_sorted <- function(data,
-                               group = NULL,
-                               weight = rep(1, nrow(as.data.frame(data)))) {
-  
-  seg_name <- paste0(colnames(as.matrix(group)), "_")
-  group <- as.character(as.matrix(group))
-  the_vars <- names(data)
-  data <- data.frame(group = group, weight = weight, data, stringsAsFactors = FALSE)
-  
-  # Total
-  total_row <- data %>%
-    group_by(group = "Total") %>%
-    summarise_at(the_vars, ~ weighted.mean(., weight, na.rm = TRUE))
-  
-  # Group means
-  means <- data %>%
-    group_by(group) %>%
-    summarise_at(the_vars, ~ weighted.mean(., weight, na.rm = TRUE))
-  
-  # Z-scores for sorting
-  z_means <- data %>%
-    mutate_at(vars(-c(1:2)), scale) %>%
-    group_by(group) %>%
-    summarise_at(the_vars, ~ weighted.mean(., weight, na.rm = TRUE))
-  
-  # Build sorted output
-  sorted_list <- list()
-  for (i in seq_along(unique(group))) {
-    entry <- data.frame(
-      Var   = names(means)[-1],
-      Mean  = as.numeric(means[i, -1]),
-      Diff  = as.numeric(means[i, -1] - total_row[-1]),
-      Zmean = as.numeric(z_means[i, -1])
-    ) %>%
-      arrange(desc(Zmean))
-    
-    names(entry) <- c(paste0(seg_name, means$group[i]),
-                      paste0("Mean_", means$group[i]),
-                      paste0("Diff_", means$group[i]),
-                      paste0("Zmean_", means$group[i]))
-    
-    sorted_list[[i]] <- entry
-  }
-  
-  output <- bind_cols(sorted_list)
-  clip_df(output, col.names = TRUE)
-  output
-}
-
 #' Multiple comparisons (Tukey HSD) after ANOVA
 #'
 #' @param data Data frame
@@ -197,30 +67,6 @@ row_standardize <- function(data, center = TRUE, scale = TRUE) {
   if (center) data <- data - rowMeans(data, na.rm = TRUE)
   if (scale)  data <- data / apply(data, 1, sd, na.rm = TRUE)
   as_tibble(data)
-}
-
-#' Top n Box
-#' @export
-make_tnb <- function(vec, scale = 1:7, n = 2) {
-  threshold <- max(scale) - (n - 1)
-  out <- tibble::as_tibble(ifelse(vec >= threshold, 1, 0))
-  names(out) <- paste0(names(vec) %||% "var", "_T", n, "B")
-  out
-}
-
-#' Bottom n Box
-#' @export
-make_bnb <- function(vec, scale = 1:7, n = 2) {
-  threshold <- min(scale) + (n - 1)
-  out <- tibble::as_tibble(ifelse(vec <= threshold, 1, 0))
-  names(out) <- paste0(names(vec) %||% "var", "_B", n, "B")
-  out
-}
-
-#' Top + Bottom n Box
-#' @export
-make_tbnb <- function(vec, scale = 1:7, top_n = 2, bottom_n = 2) {
-  bind_cols(make_tnb(vec, scale, top_n), make_bnb(vec, scale, bottom_n))
 }
 
 #' Net Promoter Score
@@ -285,17 +131,6 @@ crosstab <- function(data,
   }
   
   tab
-}
-
-#' Quick bar plot (ggplot2)
-#' @export
-quick_bar <- function(data, x, y = NULL, title = NULL, fill = NULL) {
-  p <- ggplot(data, aes(x = {{x}}, y = {{y}} %||% stat(count), fill = {{fill}})) +
-    geom_bar(stat = if (is.null(y)) "count" else "identity") +
-    theme_minimal() +
-    labs(title = title)
-  print(p)
-  invisible(p)
 }
 
 #' Quick correlation heatmap
@@ -643,3 +478,23 @@ regression_log_jrw <- function(data){
   
   tibble(Variables, RelWeight = as.numeric(epsilon), Importance = as.numeric(PropWeights))
 }
+
+create_box_indicator <- function(data,
+                                 vars,
+                                 scores,
+                                 suffix) {
+  
+  data %>%
+    mutate(
+      across(
+        all_of(vars),
+        ~ case_when(
+          is.na(.) ~ NA_real_,
+          . %in% scores ~ 1,
+          TRUE ~ 0
+        ),
+        .names = paste0("{.col}_", suffix)
+      )
+    )
+}
+                  
